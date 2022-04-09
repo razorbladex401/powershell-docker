@@ -1,0 +1,87 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+# Docker image file that describes an Ubuntu latest image with PowerShell installed from Microsoft APT Repo
+FROM rockylinux:latest AS installer-env
+
+# Define Args for the needed to add the package
+ARG PS_VERSION=7.3.0
+ARG PS_PACKAGE=powershell-${PS_VERSION}-preview.3-linux-arm64.tar.gz
+ARG PS_PACKAGE_URL=https://github.com/PowerShell/PowerShell/releases/download/v${PS_VERSION}-preview.3/${PS_PACKAGE}
+ARG PS_INSTALL_VERSION=7-preview
+
+# Download the Linux tar.gz and save it
+ADD ${PS_PACKAGE_URL} /tmp/linux.tar.gz
+
+RUN echo ${PS_PACKAGE_URL}
+
+# define the folder we will be installing PowerShell to
+ENV PS_INSTALL_FOLDER=/opt/microsoft/powershell/$PS_INSTALL_VERSION
+
+# Create the install folder
+RUN mkdir -p ${PS_INSTALL_FOLDER}
+
+# Unzip the Linux tar.gz
+RUN tar zxf /tmp/linux.tar.gz -C ${PS_INSTALL_FOLDER}
+
+# Start a new stage so we lose all the tar.gz layers from the final image
+FROM rockylinux:latest AS powershell
+
+ARG PS_VERSION=7.3.0
+ARG PS_INSTALL_VERSION=7-preview
+
+# Copy only the files we need from the previous stage
+COPY --from=installer-env ["/opt/microsoft/powershell", "/opt/microsoft/powershell"]
+
+# Define Args and Env needed to create links
+ARG PS_INSTALL_VERSION=7-preview
+ENV PS_INSTALL_FOLDER=/opt/microsoft/powershell/$PS_INSTALL_VERSION \
+    \
+    # Define ENVs for Localization/Globalization
+    DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=false \
+    LC_ALL=en_US.UTF-8 \
+    LANG=en_US.UTF-8 \
+    # set a fixed location for the Module analysis cache
+    PSModuleAnalysisCachePath=/var/cache/microsoft/powershell/PSModuleAnalysisCache/ModuleAnalysisCache \
+    POWERSHELL_DISTRIBUTION_CHANNEL=PSDocker-Ubuntu-20.04
+
+# Install dependencies and clean up
+RUN yum update -y \
+    # Required for gssntlmssp
+    && yum install -y epel-release \
+    # Update now that we have epel-release
+    && yum update -y \
+    # Install libraries for NTLM support
+    && yum install -y \
+      gssntlmssp \
+      # less is required for help in powershell
+      less \
+      # PowerShell remoting over SSH dependencies
+      openssh-clients \
+      glibc-locale-source \
+      glibc-langpack-en \
+    && yum upgrade-minimal -y --security \
+    && yum clean all \
+    && localedef --charmap=UTF-8 --inputfile=en_US $LANG
+
+# Give all user execute permissions and remove write permissions for others
+RUN chmod a+x,o-w ${PS_INSTALL_FOLDER}/pwsh \
+    # Create the pwsh symbolic link that points to powershell
+    && ln -s ${PS_INSTALL_FOLDER}/pwsh /usr/bin/pwsh \
+    # intialize powershell module cache
+    # and disable telemetry
+    && export POWERSHELL_TELEMETRY_OPTOUT=1 \
+    && pwsh \
+        -NoLogo \
+        -NoProfile \
+        -Command " \
+          \$ErrorActionPreference = 'Stop' ; \
+          \$ProgressPreference = 'SilentlyContinue' ; \
+          while(!(Test-Path -Path \$env:PSModuleAnalysisCachePath)) {  \
+            Write-Host "'Waiting for $env:PSModuleAnalysisCachePath'" ; \
+            Start-Sleep -Seconds 6 ; \
+          }"
+
+# Use PowerShell as the default shell
+# Use array to avoid Docker prepending /bin/sh -c
+CMD [ "pwsh" ]
